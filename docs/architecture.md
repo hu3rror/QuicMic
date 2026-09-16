@@ -72,6 +72,7 @@ This is the mechanism reference: what the system does and where it lives. For th
 - Token in **body**: `/api/settings` POST, `/api/client-state` (*must* be body — `navigator.sendBeacon` cannot set headers).
 - Token in **query**: `/ws`.
 - WebTransport session path: invalid/missing token → `session_request.forbidden()` (403); slot busy → `too_many_requests()` (429); teardown immediately. Intentionally **no per-IP accept rate-limiting** on the WebTransport path (LAN trust model + QUIC address validation + single-connection CAS deemed sufficient).
+- **Persistence (ADR-0016)**: the session token lives in the data directory as a `session-token` artifact; pairing and `/api/renew` write it through atomically, and startup seeds the in-memory slot from it — so a plain restart keeps the loaded page paired. A PIN-reset boot (`--pin random` / deleted `pin` file) clears it.
 
 ## Module map
 

@@ -225,7 +225,30 @@ mod tests {
             lan_ip: "192.168.1.42".to_string(),
             pairing_throttle: Arc::new(parking_lot::Mutex::new(PairingThrottle::default())),
             update_status: Arc::new(parking_lot::Mutex::new(None)),
+            identity_store: None,
         }
+    }
+
+    /// Unique empty temp directory per test (mirrors the persistence tests).
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "quicmic-server-test-{tag}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// Build an `AppState` whose handlers persist the session token through a
+    /// real `IdentityStore` over a fresh temp directory, mirroring a normal boot.
+    fn test_state_with_store() -> (AppState, crate::persistence::IdentityStore) {
+        let store = crate::persistence::IdentityStore::new(temp_dir("state-store"));
+        store.prepare().unwrap();
+        let mut state = test_state();
+        state.identity_store = Some(store.clone());
+        (state, store)
     }
 
     fn get(uri: &str) -> Request<Body> {
@@ -403,6 +426,140 @@ mod tests {
         state.stream.is_shutdown.store(true, Ordering::SeqCst);
         let resp = build_router(state).oneshot(get("/api/info")).await.unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn pair_persists_token_to_store() {
+        let (state, store) = test_state_with_store();
+        let resp = build_router(state)
+            .oneshot(post("/api/pair", json!({ "pin": "123456" })))
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(json["success"], true);
+        let token = json["token"].as_str().unwrap().to_string();
+        // Write-through: the token returned to the client is exactly what was
+        // persisted, so a later restart keeps this client paired.
+        assert_eq!(store.read_session_token().as_deref(), Some(token.as_str()));
+    }
+
+    #[tokio::test]
+    async fn pairing_takeover_invalidates_previous_token() {
+        let (state, store) = test_state_with_store();
+        let app = build_router(state);
+
+        // Device A pairs first.
+        let resp = app
+            .clone()
+            .oneshot(post("/api/pair", json!({ "pin": "123456" })))
+            .await
+            .unwrap();
+        let token_a = body_json(resp).await["token"].as_str().unwrap().to_string();
+
+        // Device B pairs with the same PIN; pairing overwrites the token in
+        // memory and on disk.
+        let resp = app
+            .clone()
+            .oneshot(post("/api/pair", json!({ "pin": "123456" })))
+            .await
+            .unwrap();
+        let token_b = body_json(resp).await["token"].as_str().unwrap().to_string();
+        assert_ne!(token_a, token_b);
+
+        // Device A's stale token is rejected — the session-taken-over 401
+        // (ADR-0009) survives the persisted-token change.
+        let req = Request::builder()
+            .uri("/api/stats")
+            .header("x-session-token", &token_a)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // ...and the store holds only B's token.
+        assert_eq!(
+            store.read_session_token().as_deref(),
+            Some(token_b.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn renew_persists_new_token_and_invalidates_old() {
+        let (state, store) = test_state_with_store();
+        let old_token = "ab".repeat(32);
+        *state.stream.session_token.lock() = Some(old_token.clone());
+        store.write_session_token(&old_token).unwrap();
+        let app = build_router(state);
+
+        let resp = app
+            .clone()
+            .oneshot(post("/api/renew", json!({ "token": old_token })))
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(json["success"], true);
+        let new_token = json["token"].as_str().unwrap().to_string();
+        assert_ne!(new_token, old_token);
+        // Write-through: the renewed token replaced the persisted one.
+        assert_eq!(
+            store.read_session_token().as_deref(),
+            Some(new_token.as_str())
+        );
+        // The old token is now invalid.
+        let resp = app
+            .oneshot(post("/api/renew", json!({ "token": old_token })))
+            .await
+            .unwrap();
+        assert_eq!(body_json(resp).await["success"], false);
+    }
+
+    #[tokio::test]
+    async fn restart_resume_renews_with_persisted_token() {
+        // Restart scenario: the persisted token survives, the boot path loads it
+        // into the in-memory slot, so the pre-restart client renews without
+        // re-pairing — the ADR-0016 core promise.
+        let store = crate::persistence::IdentityStore::new(temp_dir("restart-resume"));
+        store.prepare().unwrap();
+        let token = "ab".repeat(32);
+        store.write_session_token(&token).unwrap();
+
+        let mut state = test_state();
+        *state.stream.session_token.lock() =
+            crate::persistence::init_session_token(Some(&store), false);
+        state.identity_store = Some(store.clone());
+
+        let app = build_router(state);
+        let resp = app
+            .oneshot(post("/api/renew", json!({ "token": token })))
+            .await
+            .unwrap();
+        assert_eq!(body_json(resp).await["success"], true);
+    }
+
+    #[tokio::test]
+    async fn pin_reset_boot_clears_token_so_renew_fails() {
+        // `--pin random` boot: the boot path clears the persisted token and seeds
+        // None, so the old token no longer renews and the client must re-pair.
+        let dir = temp_dir("pin-reset");
+        let store = crate::persistence::IdentityStore::new(dir.clone());
+        store.prepare().unwrap();
+        let token = "ab".repeat(32);
+        store.write_session_token(&token).unwrap();
+        store.write_pin("111111").unwrap();
+
+        let seeded = crate::persistence::init_session_token(Some(&store), true);
+        assert_eq!(seeded, None);
+        assert!(!dir.join("session-token").exists());
+
+        let mut state = test_state();
+        *state.stream.session_token.lock() = seeded;
+        state.identity_store = Some(store.clone());
+        let app = build_router(state);
+        let resp = app
+            .oneshot(post("/api/renew", json!({ "token": token })))
+            .await
+            .unwrap();
+        assert_eq!(body_json(resp).await["success"], false);
     }
 
     #[tokio::test]

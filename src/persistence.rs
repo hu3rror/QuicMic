@@ -24,6 +24,7 @@ pub const ROTATION_AGE_SECS: u64 = 13 * 24 * 60 * 60;
 
 const IDENTITY_FILE: &str = "identity.json";
 const PIN_FILE: &str = "pin";
+const SESSION_TOKEN_FILE: &str = "session-token";
 
 /// Where the persisted identity lives.
 pub enum DataDir {
@@ -182,6 +183,34 @@ fn is_valid_pin(pin: &str) -> bool {
     pin.len() == 6 && pin.bytes().all(|b| b.is_ascii_digit())
 }
 
+fn is_valid_token(token: &str) -> bool {
+    token.len() == 64
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Resolve the session token the server boots with (ADR-0016).
+///
+/// On a boot that reset the pairing credential (`--pin random`, or a deleted
+/// `pin` file) the persisted token is cleared and `None` is returned, so the
+/// reset revokes every previously paired client. Otherwise the persisted token
+/// is loaded, so a client that survived a plain restart can renew without
+/// re-pairing. Without a store (ephemeral mode) there is nothing to load or
+/// clear, so the result is always `None` — today's in-memory behavior.
+pub fn init_session_token(store: Option<&IdentityStore>, pin_reset: bool) -> Option<String> {
+    match store {
+        Some(store) if pin_reset => {
+            if let Err(e) = store.clear_session_token() {
+                warn!(error = %e, "Failed to clear persisted session token");
+            }
+            None
+        }
+        Some(store) => store.read_session_token(),
+        None => None,
+    }
+}
+
 /// Seconds since the Unix epoch (used for rotation age decisions).
 pub fn now_secs() -> u64 {
     SystemTime::now()
@@ -199,6 +228,7 @@ struct IdentityFile {
 }
 
 /// The persisted-identity store for one data directory.
+#[derive(Clone)]
 pub struct IdentityStore {
     dir: PathBuf,
 }
@@ -295,6 +325,62 @@ impl IdentityStore {
         let pin = random_pin();
         self.write_pin(&pin)?;
         Ok(pin)
+    }
+
+    /// Load the persisted session token (ADR-0016). A missing file is the normal
+    /// unpaired state and reads as `None`; invalid content is warned about,
+    /// quarantined aside, and also reads as `None` — a token is never minted out
+    /// of nothing, "no token" is the honest state.
+    pub fn read_session_token(&self) -> Option<String> {
+        let path = self.dir.join(SESSION_TOKEN_FILE);
+        match fs::read_to_string(&path) {
+            Ok(text) => {
+                // Strict validation: the persisted value must be exactly 64
+                // lowercase hex chars, no surrounding whitespace (ADR-0016).
+                if is_valid_token(&text) {
+                    return Some(text);
+                }
+                warn!(file = ?path, "Stored session token invalid; quarantining");
+                if let Err(e) = self.quarantine(&path) {
+                    warn!(error = %e, "Failed to quarantine invalid session token");
+                }
+                None
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => {
+                warn!(file = ?path, error = %e, "Stored session token unreadable; quarantining");
+                if let Err(e) = self.quarantine(&path) {
+                    warn!(error = %e, "Failed to quarantine unreadable session token");
+                }
+                None
+            }
+        }
+    }
+
+    /// Validate and persist a session token (write-through for pair/renew, ADR-0016).
+    pub fn write_session_token(&self, token: &str) -> anyhow::Result<()> {
+        if !is_valid_token(token) {
+            anyhow::bail!("session token must be exactly 64 hex characters");
+        }
+        self.atomic_write(&self.dir.join(SESSION_TOKEN_FILE), token.as_bytes())?;
+        Ok(())
+    }
+
+    /// Remove the persisted session token (PIN-reset linkage, ADR-0016). Absence
+    /// is not an error: clearing an already-missing file is a no-op.
+    pub fn clear_session_token(&self) -> io::Result<()> {
+        match fs::remove_file(self.dir.join(SESSION_TOKEN_FILE)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Whether a persisted PIN exists. Startup uses this to detect an implicit
+    /// PIN reset (a deleted `pin` file) that must also clear the session token
+    /// (ADR-0016).
+    pub fn pin_persisted(&self) -> bool {
+        self.dir.join(PIN_FILE).exists()
     }
 
     /// Try to load a *current* identity (matching IP, fresh, valid). `None` means
@@ -744,6 +830,162 @@ mod tests {
             let name = entry.unwrap().file_name().to_string_lossy().into_owned();
             assert!(!name.ends_with(".tmp"), "leftover temp file: {name}");
         }
+    }
+
+    // ── session token store (ADR-0016) ──────────────────────────────────
+
+    #[test]
+    fn session_token_write_then_read_round_trips() {
+        let store = IdentityStore::new(temp_dir("tok-roundtrip"));
+        store.prepare().unwrap();
+        let token = "ab".repeat(32); // 64 hex chars
+        store.write_session_token(&token).unwrap();
+        assert_eq!(store.read_session_token().as_deref(), Some(token.as_str()));
+    }
+
+    #[test]
+    fn session_token_missing_file_reads_none_and_creates_nothing() {
+        let dir = temp_dir("tok-missing");
+        let store = IdentityStore::new(dir.clone());
+        store.prepare().unwrap();
+        // Missing is the normal unpaired state: no token, no file, no quarantine.
+        assert_eq!(store.read_session_token(), None);
+        assert!(!dir.join(SESSION_TOKEN_FILE).exists());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn write_session_token_rejects_invalid_values() {
+        let store = IdentityStore::new(temp_dir("tok-invalid-write"));
+        store.prepare().unwrap();
+        let bad = [
+            String::new(),
+            "abc".to_string(),
+            "G".repeat(64),         // non-hex
+            "A".repeat(64),         // uppercase hex — tokens are lowercase
+            "ab".repeat(31),        // too short
+            "ab".repeat(32) + "\n", // trailing newline
+        ];
+        for t in bad {
+            assert!(store.write_session_token(&t).is_err(), "must reject {t:?}");
+        }
+    }
+
+    #[test]
+    fn session_token_invalid_file_is_quarantined_and_reads_none() {
+        let dir = temp_dir("tok-corrupt");
+        let store = IdentityStore::new(dir.clone());
+        store.prepare().unwrap();
+        let path = dir.join(SESSION_TOKEN_FILE);
+        let bad = [
+            "not-a-token".to_string(),
+            "ab".repeat(31),
+            "G".repeat(64),
+            "A".repeat(64),
+            format!(" {}", "ab".repeat(32)),  // leading space
+            format!("\t{}", "ab".repeat(32)), // leading tab
+        ];
+        for content in bad {
+            fs::write(&path, &content).unwrap();
+            assert_eq!(
+                store.read_session_token(),
+                None,
+                "invalid content must read as no token: {content:?}"
+            );
+            assert!(
+                fs::read_dir(&dir).unwrap().any(|e| e
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("session-token.corrupt-")),
+                "invalid file must be quarantined aside"
+            );
+        }
+    }
+
+    #[test]
+    fn session_token_file_with_trailing_newline_is_quarantined() {
+        // Strict validation: the persisted value must be exactly 64 lowercase hex
+        // chars with no surrounding whitespace (ADR-0016) — a text-editor touch
+        // like a trailing newline is treated as corrupt and quarantined, never
+        // silently trimmed.
+        let dir = temp_dir("tok-strict");
+        let store = IdentityStore::new(dir.clone());
+        store.prepare().unwrap();
+        let token = "ab".repeat(32);
+        fs::write(dir.join(SESSION_TOKEN_FILE), format!("{token}\n")).unwrap();
+        assert_eq!(store.read_session_token(), None);
+        assert!(fs::read_dir(&dir).unwrap().any(|e| e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("session-token.corrupt-")));
+    }
+
+    #[test]
+    fn clear_session_token_removes_file_and_ignores_missing() {
+        let dir = temp_dir("tok-clear");
+        let store = IdentityStore::new(dir.clone());
+        store.prepare().unwrap();
+        store.write_session_token(&"ab".repeat(32)).unwrap();
+        assert!(dir.join(SESSION_TOKEN_FILE).exists());
+        store.clear_session_token().unwrap();
+        assert!(!dir.join(SESSION_TOKEN_FILE).exists());
+        // Clearing a missing file is not an error.
+        store.clear_session_token().unwrap();
+    }
+
+    #[test]
+    fn session_token_writes_leave_no_tmp_files() {
+        let dir = temp_dir("tok-atomic");
+        let store = IdentityStore::new(dir.clone());
+        store.prepare().unwrap();
+        store.write_session_token(&"ab".repeat(32)).unwrap();
+        for entry in fs::read_dir(&dir).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            assert!(!name.ends_with(".tmp"), "leftover temp file: {name}");
+        }
+    }
+
+    #[test]
+    fn pin_persisted_reflects_pin_file() {
+        let dir = temp_dir("tok-pinflag");
+        let store = IdentityStore::new(dir.clone());
+        store.prepare().unwrap();
+        assert!(!store.pin_persisted());
+        store.write_pin("123456").unwrap();
+        assert!(store.pin_persisted());
+    }
+
+    #[test]
+    fn init_session_token_loads_when_not_reset() {
+        let store = IdentityStore::new(temp_dir("tok-init-load"));
+        store.prepare().unwrap();
+        let token = "ab".repeat(32);
+        store.write_session_token(&token).unwrap();
+        assert_eq!(
+            init_session_token(Some(&store), false).as_deref(),
+            Some(token.as_str())
+        );
+    }
+
+    #[test]
+    fn init_session_token_clears_on_pin_reset() {
+        let dir = temp_dir("tok-init-reset");
+        let store = IdentityStore::new(dir.clone());
+        store.prepare().unwrap();
+        store.write_session_token(&"ab".repeat(32)).unwrap();
+        assert_eq!(init_session_token(Some(&store), true), None);
+        assert!(
+            !dir.join(SESSION_TOKEN_FILE).exists(),
+            "a PIN-reset boot must remove the persisted token"
+        );
+    }
+
+    #[test]
+    fn init_session_token_without_store_is_none() {
+        assert_eq!(init_session_token(None, false), None);
+        assert_eq!(init_session_token(None, true), None);
     }
 
     #[test]

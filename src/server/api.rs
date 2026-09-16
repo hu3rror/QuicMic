@@ -93,6 +93,19 @@ fn generate_hex_token() -> String {
     s
 }
 
+/// Persist a freshly issued session token through the store, degrading to
+/// in-memory-only on a write failure (ADR-0016). Shared by pairing and renewal.
+fn persist_session_token(state: &AppState, token: &str) {
+    if let Some(store) = &state.identity_store {
+        if let Err(e) = store.write_session_token(token) {
+            warn!(
+                error = %e,
+                "Failed to persist session token; continuing in memory only"
+            );
+        }
+    }
+}
+
 /// GET /api/info — Server metadata including the cert hash for WebTransport.
 pub(super) async fn handle_info(State(state): State<AppState>) -> Json<ServerInfo> {
     let latest_version = state.update_status.lock().clone();
@@ -167,6 +180,9 @@ pub(super) async fn handle_pair(
         let mut guard = state.stream.session_token.lock();
         *guard = Some(token.clone());
     }
+    // Write the new token through to the store so a restart keeps this client
+    // paired (ADR-0016). A failed write degrades to in-memory only for this run.
+    persist_session_token(&state, &token);
 
     info!("Device paired successfully");
 
@@ -198,6 +214,9 @@ pub(super) async fn handle_renew(
 
     if let Some(token) = new_token {
         info!("Session token renewed (invalidating old connections)");
+        // Write the renewed token through to the store (ADR-0016); a failed write
+        // degrades to in-memory only for this run.
+        persist_session_token(&state, &token);
         let _ = state.stream.cancel_tx.send(());
         // Give the old session ~50ms to receive the cancellation and release the
         // connection slot before the client opens its new stream (smooths handover).

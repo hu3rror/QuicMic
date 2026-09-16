@@ -153,7 +153,8 @@ struct Cli {
     #[arg(long)]
     ip: Option<String>,
 
-    /// Set a custom 6-digit pairing PIN (persisted; `random` regenerates one).
+    /// Set a custom 6-digit pairing PIN (persisted; `random` regenerates one and
+    /// revokes all paired sessions).
     #[arg(long)]
     pin: Option<String>,
 
@@ -307,20 +308,29 @@ async fn run() -> anyhow::Result<()> {
 
     // ── Resolve pairing PIN (persisted, ADR-0015) ──────────────────────
     let pin_cmd = persistence::parse_pin_arg(cli.pin.as_deref())?;
-    let pin = match (&store, &pin_cmd) {
+    // `pin_reset` is true when this boot re-created the pairing credential
+    // (explicit `--pin random`, or a missing pin file). The persisted session
+    // token must then be cleared too, so one reset action revokes every paired
+    // client (ADR-0016).
+    let (pin, pin_reset) = match (&store, &pin_cmd) {
         (Some(store), cmd) => match resolve_stored_pin(store, cmd) {
-            Ok(pin) => pin,
+            Ok(result) => result,
             Err(e) if degrade => {
                 warn!(
                     error = %e,
                     "Stored PIN unusable; using an ephemeral PIN (nothing will persist)"
                 );
-                ephemeral_pin(cmd)
+                (ephemeral_pin(cmd), false)
             }
             Err(e) => return Err(e),
         },
-        (None, cmd) => ephemeral_pin(cmd),
+        (None, cmd) => (ephemeral_pin(cmd), false),
     };
+
+    // ── Seed the session token (persisted, ADR-0016) ───────────────────
+    // A plain restart loads the stored token, so the pre-restart client renews
+    // without re-pairing; a PIN-reset boot clears it.
+    *session_token.lock() = persistence::init_session_token(store.as_ref(), pin_reset);
 
     // ── Load or generate TLS identity (persisted, ADR-0015) ────────────
     let (wt_identity, identity) = match &store {
@@ -395,6 +405,7 @@ async fn run() -> anyhow::Result<()> {
         lan_ip: lan_ip.to_string(),
         pairing_throttle: Arc::new(parking_lot::Mutex::new(server::PairingThrottle::default())),
         update_status,
+        identity_store: store.clone(),
     };
 
     let router = server::build_router(app_state);
@@ -467,18 +478,24 @@ fn parse_ip_arg(s: &str) -> anyhow::Result<IpAddr> {
 }
 
 /// Resolve the pairing PIN through the persisted store (write-through for a
-/// fixed PIN, generate-and-persist for `random`/first run).
+/// fixed PIN, generate-and-persist for `random`/first run). The second value
+/// reports whether this boot reset the pairing credential (`--pin random`, or a
+/// missing pin file) — in which case the persisted session token must also be
+/// cleared (ADR-0016).
 fn resolve_stored_pin(
     store: &persistence::IdentityStore,
     cmd: &persistence::PinArg,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, bool)> {
     match cmd {
         persistence::PinArg::Fixed(pin) => {
             store.write_pin(pin)?;
-            Ok(pin.clone())
+            Ok((pin.clone(), false))
         }
-        persistence::PinArg::Random => store.write_random_pin(),
-        persistence::PinArg::Default => store.read_pin(),
+        persistence::PinArg::Random => Ok((store.write_random_pin()?, true)),
+        persistence::PinArg::Default => {
+            let reset = !store.pin_persisted();
+            Ok((store.read_pin()?, reset))
+        }
     }
 }
 

@@ -121,6 +121,10 @@ pub struct AppState {
     /// Latest newer release tag found by the startup update check, if any. Read by
     /// `/api/info` so the web UI can show a small "update available" banner.
     pub update_status: Arc<parking_lot::Mutex<Option<String>>>,
+    /// Persisted-identity store, present when a usable data directory exists
+    /// (ADR-0015). Handlers write the session token through it (ADR-0016); absent
+    /// in ephemeral mode, where everything stays in memory.
+    pub identity_store: Option<crate::persistence::IdentityStore>,
 }
 
 /// Try to atomically claim the single-connection slot, retrying briefly to
