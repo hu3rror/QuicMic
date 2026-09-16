@@ -45,6 +45,9 @@ let isPowerSaveActive = false;
 let lastVuUpdateTime = 0;
 let wakeLock = null;         // Screen Wake Lock sentinel (held during Eco Mode).
 let ecoDimTimer = null;      // Timer that fades the Eco Mode controls to black.
+let isWaiting = false;       // The bounded server-wait state is active (issue #3).
+let waitStartedAt = 0;       // When the server wait began, for its ~60s cap.
+let waitTimer = null;        // The ~3s re-validation tick of the server wait.
 let voiceTimeout = null;     // Debounce for the voice-activity glow on the mic ring.
 
 // Auto-reconnect
@@ -82,6 +85,7 @@ const pinInput = document.getElementById('pin-input');
 const pairBtn = document.getElementById('pair-btn');
 const serverLost = document.getElementById('server-lost');
 const reloadBtn = document.getElementById('reload-btn');
+const pairStatus = document.getElementById('pair-status');
 const micBtn = document.getElementById('mic-btn');
 const micRing = document.getElementById('mic-ring');
 const micIcon = document.getElementById('mic-icon');
@@ -117,6 +121,18 @@ const gainReset = document.getElementById('gain-reset');
 const lrSlider = document.getElementById('lr-slider');
 const lrValue = document.getElementById('lr-value');
 const lrReset = document.getElementById('lr-reset');
+
+// ── Fail-open storage ────────────────────────────────────────────────
+// localStorage quota/security errors (private mode, blocked cookies) must never
+// break pairing: they degrade to a session-only in-memory fallback instead of
+// being misreported as a dead server (issue #3).
+let browserStorage = null;
+try {
+    browserStorage = window.localStorage;
+} catch (e) {
+    // Storage access blocked entirely (e.g. sandboxed context).
+}
+const storage = QuicMicSession.createSafeStorage(browserStorage);
 
 // ── Generic Helpers ───────────────────────────────────────────────────
 
@@ -193,7 +209,7 @@ async function init() {
         // Remember the dismissal per version so we don't nag again until a newer
         // release appears.
         if (serverInfo && serverInfo.latest_version) {
-            localStorage.setItem('dismissedUpdate', serverInfo.latest_version);
+            storage.set('dismissedUpdate', serverInfo.latest_version);
         }
     });
     maybeShowUpdateBanner();
@@ -270,28 +286,32 @@ async function init() {
     // Update stats display every second
     setInterval(updateStats, 1000);
 
-    // QR code pairing: URL hash always takes priority (may contain PIN from QR scan)
+    // Entry routing (issue #3): a QR hash always means explicit pairing intent —
+    // the stored token is discarded and the scanned PIN is used. Without a hash,
+    // a stored token resumes the session by validation, NEVER by rotation: a page
+    // load must not be a session handover (renew stays on pair/stream/reconnect).
     const hash = location.hash.slice(1);
-    if (hash && hash.length >= 1) {
-        // Clear any stale token from a previous server session
-        localStorage.removeItem('sessionToken');
+    const route = QuicMicSession.resolveEntry({
+        hasHash: hash.length >= 1,
+        storedToken: storage.get('sessionToken'),
+    });
+    if (route === 'pair') {
+        // Clear any stale token from a previous server session. Safe because the
+        // pairing credential is atomic (PIN validity ⇔ token validity, ADR-0016):
+        // a valid PIN implies a valid token, so discarding the token first loses
+        // nothing — and a stale PIN means the token was stale too.
+        storage.remove('sessionToken');
         sessionToken = null;
         pinInput.value = hash;
         // Clean up the hash so it doesn't show in the URL
         history.replaceState(null, '', location.pathname);
         // Auto-pair after a short delay (to let UI render)
         setTimeout(doPair, 300);
-    } else {
-        // No QR hash — check if we have a stored token from a previous pair
-        const storedToken = localStorage.getItem('sessionToken');
-        if (storedToken) {
-            sessionToken = storedToken;
-            pairScreen.classList.remove('active');
-            mainScreen.classList.add('active');
-            // Invalidate any stale zombie streams on the server immediately
-            renewSessionToken();
-        }
+    } else if (route === 'resume') {
+        sessionToken = storage.get('sessionToken');
+        resumeSession();
     }
+    // route === 'pairing-screen': the already-shown PIN entry stays as-is.
 
     // Returning to the foreground is the one moment we may safely try to restore
     // capture (see the microphone-recovery section). Going *hidden* is deliberately
@@ -311,6 +331,12 @@ async function init() {
 async function onPageVisible() {
     // Screen Wake Locks are auto-released when the page is hidden; re-acquire.
     if (isPowerSaveActive && !wakeLock) acquireWakeLock();
+    // Backgrounded pages throttle timers to minutes, so a page that was waiting
+    // for the server while hidden needs an immediate verdict on return.
+    if (isWaiting) {
+        runWaitStep();
+        return;
+    }
     if (!isStreaming) return;
 
     // While we were hidden the OS may have taken the microphone — and JS was frozen, so
@@ -339,28 +365,69 @@ async function onPageVisible() {
     if (!isReconnecting) fetchServerStats();
 }
 
-async function renewSessionToken() {
+async function resumeSession() {
     if (!sessionToken) return;
-    try {
-        const renewed = await renewToken();
-        if (renewed) {
-            // Push client settings to the server to ensure consistency.
-            updateServerSettings();
-        } else {
-            // renewToken() returns false for both a 503 (server gone) and an invalid
-            // token (server alive). Probe once to tell them apart: gone -> lock+reload,
-            // alive -> re-pair in place.
-            const gone = !(await isServerAlive());
-            returnToPairing(gone ? 'Server closed' : 'Session expired. Please pair again.', gone);
-        }
-    } catch (e) {
-        console.warn('[init] failed to renew session token:', e);
-        returnToPairing('Server closed', true);
+    // Blocking resume: inputs stay disabled until the verdict, so a stale token
+    // can never race a manual pair attempt mid-validation.
+    pinInput.disabled = true;
+    pairBtn.disabled = true;
+    showPairingStatus('Restoring session…');
+    const verdict = await validateSessionToken();
+    if (verdict === 'ok') {
+        hidePairingStatus();
+        enterMainScreen();
+        // A restarted server may be holding CLI defaults: push our saved settings.
+        updateServerSettings();
+    } else if (verdict === 'taken-over') {
+        hidePairingStatus();
+        returnToPairing('Session expired. Please pair again.', false);
+    } else {
+        // Unavailable (503 / unreachable): bounded wait instead of an immediate lock.
+        enterServerWait();
     }
 }
 
-function returnToPairing(reason, serverGone = false) {
-    console.warn('[pairing] returning to pairing screen:', reason, serverGone ? '(server gone)' : '');
+/** Validate the stored token over HTTP; deliberately never rotates it. */
+async function validateSessionToken() {
+    try {
+        const resp = await fetchWithTimeout('/api/stats', { headers: { 'X-Session-Token': sessionToken } });
+        return QuicMicSession.interpretValidate(resp.status);
+    } catch (e) {
+        return 'gone'; // Unreachable == unavailable (ADR-0009).
+    }
+}
+
+function showPairingStatus(text) {
+    pairStatus.textContent = text;
+    pairStatus.hidden = false;
+}
+
+function hidePairingStatus() {
+    pairStatus.hidden = true;
+}
+
+/** Cancel a pending wait tick (called on every wait terminal). */
+function clearWaitTimer() {
+    if (waitTimer) {
+        clearTimeout(waitTimer);
+        waitTimer = null;
+    }
+}
+
+/**
+ * Bounded wait for a confirmed server-gone (issue #3). ADR-0015 made the
+ * certificate stable across plain restarts, so locking behind Reload on every
+ * restart (the old ADR-0009 default) is now wrong for the common case: we
+ * re-validate the stored token every ~3s for up to ~60s and resume with zero
+ * clicks when the server is back. The client cannot tell a plain restart from a
+ * replaced machine (it cannot inspect its own TLS cert), so after the cap it
+ * falls back to the Reload lock — the one recovery that also handles a changed
+ * certificate.
+ */
+function enterServerWait() {
+    if (isWaiting) return;
+    isWaiting = true;
+    console.warn('[wait] server confirmed gone — waiting up to ~60s for it to return');
     if (isStreaming) {
         stopStreaming();
     }
@@ -374,18 +441,83 @@ function returnToPairing(reason, serverGone = false) {
         powerSaveOverlay.classList.remove('dimmed');
         releaseWakeLock();
     }
-    localStorage.removeItem('sessionToken');
+    mainScreen.classList.remove('active');
+    pairScreen.classList.add('active');
+    pinInput.disabled = true;
+    pairBtn.disabled = true;
+    serverLost.hidden = true;
+    showPairingStatus('Waiting for server…');
+    waitStartedAt = Date.now();
+    scheduleWaitRetry();
+}
+
+function scheduleWaitRetry() {
+    if (waitTimer) clearTimeout(waitTimer);
+    waitTimer = setTimeout(runWaitStep, QuicMicSession.WAIT_RETRY_MS);
+}
+
+/** One re-validation tick of the server wait; the terminals mirror resumeSession. */
+async function runWaitStep() {
+    // A stale tick (e.g. a timer that fired after onPageVisible already resolved
+    // the wait) must never act once the wait ended — it could lock the main
+    // screen behind Reload from a long-past verdict.
+    if (!isWaiting) return;
+    const verdict = await validateSessionToken();
+    const step = QuicMicSession.nextWaitStep({
+        startedAt: waitStartedAt,
+        lastVerdict: verdict,
+        now: Date.now(),
+    });
+    if (step === 'enter') {
+        isWaiting = false;
+        clearWaitTimer();
+        hidePairingStatus();
+        enterMainScreen();
+        updateServerSettings();
+    } else if (step === 'pair') {
+        isWaiting = false;
+        clearWaitTimer();
+        hidePairingStatus();
+        returnToPairing('Session expired. Please pair again.', false);
+    } else if (step === 'lock') {
+        isWaiting = false;
+        clearWaitTimer();
+        hidePairingStatus();
+        returnToPairing('Server closed', true);
+    } else {
+        scheduleWaitRetry();
+    }
+}
+
+function returnToPairing(reason, reloadRequired = false) {
+    console.warn('[pairing] returning to pairing screen:', reason, reloadRequired ? '(reload required)' : '');
+    isWaiting = false;
+    hidePairingStatus();
+    clearWaitTimer();
+    if (isStreaming) {
+        stopStreaming();
+    }
+    if (isPowerSaveActive) {
+        isPowerSaveActive = false;
+        if (ecoDimTimer) {
+            clearTimeout(ecoDimTimer);
+            ecoDimTimer = null;
+        }
+        powerSaveOverlay.classList.remove('active');
+        powerSaveOverlay.classList.remove('dimmed');
+        releaseWakeLock();
+    }
+    storage.remove('sessionToken');
     sessionToken = null;
     mainScreen.classList.remove('active');
     pairScreen.classList.add('active');
 
-    if (serverGone) {
-        // The server is gone. If it comes back it will have a NEW self-signed
-        // certificate (regenerated on every start), so this page's pinned hash and
-        // already-accepted cert are stale: in-page re-pairing would silently fail on
-        // the cert mismatch, and we can't even probe for its return (the mismatch
-        // fails the fetch). A full reload is the only reliable way back — so lock the
-        // PIN entry and prompt a refresh.
+    if (reloadRequired) {
+        // Terminal fallback after the bounded wait (issue #3): the client cannot
+        // tell a plain restart (same cert, ADR-0015) from a replaced machine (new
+        // cert) — it cannot inspect its own TLS connection — so after the wait
+        // window it forces the one recovery that handles both: a reload, which
+        // re-fetches /api/info and re-pins whatever certificate is served.
         pinInput.value = '';
         pinInput.disabled = true;
         pairBtn.disabled = true;
@@ -537,7 +669,7 @@ function applySettingsToUI(s) {
 }
 
 function loadSettings() {
-    const saved = localStorage.getItem('quicmic_settings');
+    const saved = storage.get('quicmic_settings');
     if (saved) {
         // The client (localStorage) is the source of truth, so a user's saved
         // settings survive a server restart: apply them and let the pair/renew sync
@@ -567,7 +699,7 @@ async function updateServerSettings() {
         latency_threshold: parseInt(lrSlider.value),
     };
 
-    localStorage.setItem('quicmic_settings', JSON.stringify(settings));
+    storage.set('quicmic_settings', JSON.stringify(settings));
     sendGateToWorklet(); // keep the worklet's client-side gate in sync
     sendGainToWorklet(); // and the gain
 
@@ -623,10 +755,16 @@ async function renewToken() {
     const result = await resp.json();
     if (result.success && result.token) {
         sessionToken = result.token;
-        localStorage.setItem('sessionToken', sessionToken);
+        storage.set('sessionToken', sessionToken);
         return true;
     }
     return false;
+}
+
+/** Show the main screen (shared by pairing and resume). */
+function enterMainScreen() {
+    pairScreen.classList.remove('active');
+    mainScreen.classList.add('active');
 }
 
 async function doPair() {
@@ -653,9 +791,8 @@ async function doPair() {
 
         if (result.success) {
             sessionToken = result.token;
-            localStorage.setItem('sessionToken', sessionToken);
-            pairScreen.classList.remove('active');
-            mainScreen.classList.add('active');
+            storage.set('sessionToken', sessionToken);
+            enterMainScreen();
             // Push settings to server after pairing
             updateServerSettings();
         } else {
@@ -690,10 +827,14 @@ async function startStreaming() {
         if (sessionToken) {
             const renewed = await renewToken();
             if (!renewed) {
-                // Distinguish a gone server (lock + reload) from a merely stale
-                // session on a live server (re-pair in place).
+                // A reachable server with a rejected token means a stale session
+                // (re-pair in place); an unreachable one enters the bounded wait.
                 const gone = !(await isServerAlive());
-                returnToPairing(gone ? 'Server closed' : 'Session expired. Please pair again.', gone);
+                if (gone) {
+                    enterServerWait();
+                } else {
+                    returnToPairing('Session expired. Please pair again.', false);
+                }
                 return;
             }
         }
@@ -738,7 +879,7 @@ async function startStreaming() {
         stopStreaming();
 
         if (isNetworkError) {
-            returnToPairing('Server closed', true);
+            enterServerWait();
         } else {
             if (errMsg === 'WebSocket connection failed') {
                 errMsg = 'Connection rejected. Another device may be active. Try again in 5s.';
@@ -1345,9 +1486,9 @@ async function handleUnexpectedDisconnect() {
         return;
     }
     if (!alive) {
-        console.log('[disconnect] server is gone -> returning to pairing');
+        console.log('[disconnect] server is gone -> waiting for it to return');
         isReconnecting = false;
-        returnToPairing('Server closed', true);
+        enterServerWait();
         return;
     }
 
@@ -1398,11 +1539,13 @@ async function reconnectLoop() {
 
     isReconnecting = false;
     if (isStreaming) {
-        // Decide the terminal state with a single probe: a reachable server means
-        // the session is just stale (re-pair in place); an unreachable one means a
-        // reload is needed (the cert changes on restart).
-        const gone = !(await isServerAlive());
-        returnToPairing(gone ? 'Server closed' : 'Session expired. Please pair again.', gone);
+        // A reachable server means the session is just stale (re-pair in place);
+        // an unreachable one enters the bounded wait instead of locking.
+        if (!(await isServerAlive())) {
+            enterServerWait();
+        } else {
+            returnToPairing('Session expired. Please pair again.', false);
+        }
     }
 }
 
@@ -1510,8 +1653,9 @@ function updateStats() {
     // Fetch server stats for packet loss, ping, and buffer depth display.
     if (isStreaming) {
         fetchServerStats();
-    } else if (sessionToken) {
+    } else if (sessionToken && !isWaiting) {
         // Idle on the main screen: check the server is still alive every 3s.
+        // (Skipped during the server wait — runWaitStep is the sole validator.)
         healthCheckTicks++;
         if (healthCheckTicks >= 3) {
             healthCheckTicks = 0;
@@ -1539,23 +1683,26 @@ async function fetchServerStats() {
         // If the probe succeeds the server is up and the stream is still fine,
         // so an isolated failure is silently tolerated.
         if (isStreaming && !isReconnecting && !(await isServerAlive())) {
-            console.warn('[stats] server unreachable -> returning to pairing');
-            returnToPairing('Server closed', true);
+            console.warn('[stats] server unreachable -> waiting');
+            enterServerWait();
         }
         return;
     }
 
-    // 401 = our session was invalidated (e.g. taken over by another device) while
-    // the server itself is alive: re-pair in place (the cert is unchanged).
-    if (resp.status === 401) {
+    // Single verdict vocabulary for every validation path (issue #3, decision 6):
+    // 401 = session taken over (re-pair in place); anything else non-2xx (503
+    // during shutdown) or unreachable = gone (bounded wait).
+    const verdict = QuicMicSession.interpretValidate(resp.status);
+    if (verdict === 'taken-over') {
         console.warn('[stats] session no longer valid -> returning to pairing');
         returnToPairing('Session expired. Please pair again.', false);
         return;
     }
-    // Any other non-2xx (503) means the server is shutting down — definitive.
-    if (!resp.ok) {
-        console.warn('[stats] server is shutting down (HTTP', resp.status + ') -> returning to pairing');
-        returnToPairing('Server closed', true);
+    if (verdict === 'gone') {
+        // Enter the bounded wait instead of locking: a plain restart keeps the
+        // certificate, so the wait usually ends by resuming (ADR-0015, issue #3).
+        console.warn('[stats] server unavailable (HTTP', resp.status + ') -> waiting');
+        enterServerWait();
         return;
     }
 
@@ -1591,21 +1738,22 @@ async function fetchServerStats() {
 async function checkServerHealth() {
     try {
         const resp = await fetchWithTimeout('/api/stats', { headers: { 'X-Session-Token': sessionToken } });
+        const verdict = QuicMicSession.interpretValidate(resp.status);
         // Session taken over (server alive): re-pair in place, no reload.
-        if (resp.status === 401) {
+        if (verdict === 'taken-over') {
             returnToPairing('Session expired. Please pair again.', false);
             return;
         }
-        // 503 = shutting down — definitive.
-        if (!resp.ok) {
-            returnToPairing('Server closed', true);
+        // 503 = shutting down — definitive: enter the bounded wait (issue #3).
+        if (verdict === 'gone') {
+            enterServerWait();
         }
     } catch (e) {
         // One confirming probe before concluding the server is gone, so a single
         // transient idle blip doesn't force a reload (parity with the streaming path).
         if (!(await isServerAlive())) {
             console.warn('[health] idle health check failed and server is unreachable');
-            returnToPairing('Server closed', true);
+            enterServerWait();
         }
     }
 }
@@ -1617,7 +1765,7 @@ async function checkServerHealth() {
  */
 function maybeShowUpdateBanner() {
     if (!serverInfo || !serverInfo.update_available || !serverInfo.latest_version) return;
-    if (localStorage.getItem('dismissedUpdate') === serverInfo.latest_version) return;
+    if (storage.get('dismissedUpdate') === serverInfo.latest_version) return;
     updateText.textContent = `New version ${serverInfo.latest_version} available`;
     updateLink.href = serverInfo.releases_url || '#';
     updateBanner.hidden = false;

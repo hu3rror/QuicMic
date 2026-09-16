@@ -173,6 +173,15 @@ body {
     line-height: 1.6;
 }
 
+/* Shown on the pairing card during "Restoring session…" and the bounded
+   "Waiting for server…" wait (issue #3). */
+.pair-status {
+    margin-top: 14px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    text-align: center;
+}
+
 .pin-input:focus {
     border-color: var(--accent);
     box-shadow: 0 0 0 4px var(--accent-glow);
