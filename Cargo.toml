@@ -72,6 +72,12 @@ tokio-rustls = { version = "0.26", default-features = false, features = [
 rustls-native-certs = "0.8"
 ring = "0.17"
 base64 = "0.22"
+# PEM parsing for the persisted identity load path (`from_pem`). Already in the
+# tree via rustls/wtransport; declaring it here adds no new compiled crate.
+rustls-pki-types = "1"
+# X.509 parsing (certificate public key extraction) for the same load path.
+# Already in the tree via wtransport.
+x509-parser = "0.18"
 
 # Concurrency
 parking_lot = "0.12"

@@ -13,7 +13,9 @@ Use these terms as defined here when naming domain concepts in issues, specs, te
 
 - **Client / phone** — the browser page capturing and streaming audio. The primary mobile target is iOS Safari (also Android Chrome, desktop browsers).
 - **Server / PC** — the Rust binary running on the target machine, hosting the UI, pairing, transports, and the audio output device.
-- **Pairing** — the PIN-based handshake by which a client proves it may stream (6-digit PIN shown in the startup QR; see ADR-0006, ADR-0012). A paired client holds a **session token**.
+- **Pairing** — the PIN-based handshake by which a client proves it may stream (6-digit PIN shown in the startup QR; see ADR-0006, ADR-0012, ADR-0015). A paired client holds a **session token**.
+- **Persisted identity / 持久身份** — the server's machine-local pairing material reused across restarts: the TLS self-signed keypair (certificate + private key) together with the 6-digit pairing PIN. It lives in the platform data directory (see ADR-0015) and is tied to the LAN IP it was built for. The certificate keypair and the PIN are independent artifacts with independent lifecycles: the certificate rotates, the PIN does not.
+- **Identity rotation / 身份轮换** — regeneration of the server's TLS certificate keypair only, triggered when the LAN IP changed or the certificate approaches the two-week validity ceiling (≤ 13 days). The pairing PIN never changes with rotation; deleting the `pin` file or passing `--pin random` is the only way to reset it.
 - **Session token** — the per-session secret renewed by `/api/renew` on every (re)connect, carried on `/api/stats`, `/api/settings` POST, `/api/client-state`, `/ws`, and the WebTransport session. See `docs/architecture.md` → Auth surfaces.
 - **Stream** — one active audio connection. The server allows exactly **one** at a time (single-connection contract, ADR-0007).
 - **Transport** — the network path for audio: **WebTransport** (QUIC/UDP, primary) or **WebSocket** (TCP, fallback). Transport-agnostic logic must not branch on close codes (ADR-0009).

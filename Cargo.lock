@@ -1650,6 +1650,7 @@ dependencies = [
  "rust-embed",
  "rustls",
  "rustls-native-certs",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "tokio",
@@ -1658,6 +1659,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wtransport",
+ "x509-parser",
 ]
 
 [[package]]

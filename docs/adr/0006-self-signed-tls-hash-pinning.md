@@ -4,6 +4,8 @@
 - **Date:** 2026-06-27
 - **Provenance:** commit `643d4fe` (initial commit)
 
+> **Superseded in part by [ADR-0015](0015-persisted-identity.md).** This ADR still governs *what the certificate is* (self-signed ECDSA P-256, SHA-256 hash pinning via `serverCertificateHashes`, 14-day validity ceiling, `--dump-certs`). It no longer governs *where it comes from*: items 1 and 5 and the Consequences paragraph below (in-memory generation, zero disk writes, regenerated on every start) are replaced by a machine-local persisted identity that is reused across restarts. Body text left unchanged — see ADR-0015 for the superseding design.
+
 ## Background
 
 WebTransport requires a secure HTTPS/QUIC connection. Local IP addresses (e.g. `192.168.1.X`) cannot easily get signed SSL certificates from public authorities (Let's Encrypt etc.), and the connection is LAN-only.

@@ -18,7 +18,7 @@ QuicMic runs a tiny server on your computer and serves a web page to your phone.
 
 - **Low latency** — unreliable QUIC datagrams over LAN, a lock-free SPSC ring buffer, and on-the-fly resampling keep mouth-to-speaker delay small.
 - **No installation on the phone** — it's just a web page; works on iOS Safari, Android Chrome, and desktop browsers.
-- **Secure pairing** — a random 6-digit PIN with brute-force lockout; the PIN never leaves the device in plaintext requests.
+- **Secure pairing** — a 6-digit PIN (random on first run, then fixed per machine) with brute-force lockout; the PIN never leaves the device in plaintext requests.
 - **QR-code setup** — scan the code printed in the terminal to open the page pre-filled with the PIN.
 - **Live audio controls** — noise gate, gain, and latency-recovery sliders, adjustable at runtime from the phone.
 - **Eco Mode** — a black-screen overlay that keeps streaming alive while saving battery / preventing OLED burn-in.
@@ -136,7 +136,7 @@ Then `cargo build` works normally. This is a one-time, machine-local toolchain s
 
 ### ⚠️ "Your connection is not secure" — this is expected
 
-QuicMic generates a **self-signed TLS certificate** on the fly (a LAN IP can't get a publicly trusted certificate). When you open the page, the browser will warn that the connection is **not private / not secure**. This is normal on your own network:
+QuicMic uses a **self-signed TLS certificate** (a LAN IP can't get a publicly trusted one): it is generated on first run, stored machine-locally, and reused until it rotates (~14 days), so restarts keep the same certificate and PIN. When you open the page, the browser will warn that the connection is **not private / not secure**. This is normal on your own network:
 
 - Tap **Advanced → Proceed to `<your-PC-IP>` (unsafe)** to continue.
 - The low-latency WebTransport stream itself does **not** show this warning — it pins the certificate by hash — but the initial page load over HTTPS does.
@@ -169,7 +169,8 @@ Run `quicmic -h` for the full list. The main options:
 | `-d, --device <NAME>` | platform default | Output device, matched as a case-insensitive substring. Defaults: `CABLE Input` (Windows), `BlackHole` (macOS), `VirtualQuicMic` (Linux). Also via `QUICMIC_DEVICE`. |
 | `--list-devices` | — | List available audio output devices and exit. |
 | `--ip <IP>` | auto-detected | Override the auto-detected LAN IP address. |
-| `--pin <PIN>` | random | Use a fixed pairing PIN instead of a random 6-digit one. |
+| `--data-dir <PATH>` | platform default | Where the persisted identity (certificate + PIN) lives: `%LOCALAPPDATA%\QuicMic` (Windows), `~/Library/Application Support/QuicMic` (macOS), `$XDG_DATA_HOME/QuicMic` or `~/.local/share/QuicMic` (Linux). Also via `QUICMIC_DATA_DIR`. |
+| `--pin <PIN>` | stored | Pairing PIN. A 6-digit value is fixed and **persisted** (survives restarts); `random` regenerates a fresh one. First run generates and stores a random PIN. |
 | `--noise-gate <DB>` | `-50` | Initial noise-gate threshold in **dB**, from `-100` (Off) to `0`. Matches the web UI slider. Adjustable at runtime. |
 | `--gain <VALUE>` | `1.0` | Initial gain multiplier (`1.0` = unity). Adjustable at runtime. |
 | `--latency-threshold <MS>` | `150` | Initial latency-recovery threshold in milliseconds (`0` = off). Adjustable at runtime. |
@@ -267,11 +268,11 @@ Usually Wi-Fi congestion. Prefer a **5 GHz** network, move closer to the router,
 
 ## 🔐 Security notes
 
-- Pairing uses a random **6-digit PIN**; after 5 failed attempts **from the same client (tracked per IP)** that client is locked out for 30 seconds, so one bad actor can't lock everyone out.
+- Pairing uses a **6-digit PIN** (random on first run, then fixed per machine — persisted across restarts; reset with `--pin random`); after 5 failed attempts **from the same client (tracked per IP)** that client is locked out for 30 seconds, so one bad actor can't lock everyone out.
 - PINs and session tokens are compared in **constant time**.
 - State-changing API requests are rejected if their `Origin` doesn't match the server's own host (a same-origin guard against cross-site requests).
 - Only **one** client may stream at a time.
-- The TLS certificate is **self-signed, in-memory, and short-lived** (14 days), regenerated on each start. QuicMic is intended for use on a **trusted local network**, not the public internet.
+- The TLS certificate is **self-signed, stored machine-locally, and short-lived** (rotates at ~14 days), so restarts keep the same certificate and PIN. QuicMic is intended for use on a **trusted local network**, not the public internet.
 
 ---
 

@@ -1,14 +1,16 @@
 mod audio;
+mod persistence;
 mod server;
 mod tls;
 mod update_check;
 
 use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use clap::Parser;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 /// Ring-buffer depth, sized at a nominal 48 kHz (the rate browsers capture at).
@@ -151,9 +153,14 @@ struct Cli {
     #[arg(long)]
     ip: Option<String>,
 
-    /// Set a custom 6-digit pairing PIN (auto-generated if omitted).
+    /// Set a custom 6-digit pairing PIN (persisted; `random` regenerates one).
     #[arg(long)]
     pin: Option<String>,
+
+    /// Directory for the persisted identity (certificate + PIN). Defaults to a
+    /// platform data directory; also via QUICMIC_DATA_DIR.
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
 
     /// Dump TLS certificates to the certs/ directory for debugging.
     #[arg(long)]
@@ -280,19 +287,59 @@ async fn run() -> anyhow::Result<()> {
         device_ok.clone(),
     )?;
 
-    // ── Generate TLS identity ───────────────────────────────────────────
-    let (wt_identity, identity) = tls::generate_identity(lan_ip, cli.dump_certs)?;
-
-    // ── Generate pairing PIN ────────────────────────────────────────────
-    let pin = match cli.pin {
-        Some(pin) => {
-            if pin.len() != 6 || !pin.bytes().all(|b| b.is_ascii_digit()) {
-                anyhow::bail!("--pin must be exactly 6 digits (0-9)");
-            }
-            pin
+    // ── Resolve data directory & identity store (ADR-0015) ─────────────
+    let env_data_dir = std::env::var_os("QUICMIC_DATA_DIR").map(PathBuf::from);
+    let dir_choice = persistence::resolve_data_dir(
+        cli.data_dir.as_deref(),
+        env_data_dir.as_deref(),
+        persistence::platform_data_dir().as_deref(),
+    );
+    // `degrade` means failures below are downgraded to an ephemeral identity/PIN
+    // instead of aborting startup (platform-default dirs, per ADR-0015); an
+    // explicitly configured dir keeps failing hard.
+    let (store, degrade) = match persistence::open_store(dir_choice)? {
+        persistence::StoreResult::Persist(store) => {
+            info!(dir = ?store.path(), "Persisted identity store ready");
+            (Some(store), false)
         }
-        None => format!("{:06}", rand::random_range(0..1_000_000u32)),
+        persistence::StoreResult::Ephemeral => (None, true),
     };
+
+    // ── Resolve pairing PIN (persisted, ADR-0015) ──────────────────────
+    let pin_cmd = persistence::parse_pin_arg(cli.pin.as_deref())?;
+    let pin = match (&store, &pin_cmd) {
+        (Some(store), cmd) => match resolve_stored_pin(store, cmd) {
+            Ok(pin) => pin,
+            Err(e) if degrade => {
+                warn!(
+                    error = %e,
+                    "Stored PIN unusable; using an ephemeral PIN (nothing will persist)"
+                );
+                ephemeral_pin(cmd)
+            }
+            Err(e) => return Err(e),
+        },
+        (None, cmd) => ephemeral_pin(cmd),
+    };
+
+    // ── Load or generate TLS identity (persisted, ADR-0015) ────────────
+    let (wt_identity, identity) = match &store {
+        Some(store) => match store.load_or_create(lan_ip, persistence::now_secs()) {
+            Ok(identity) => identity,
+            Err(e) if degrade => {
+                warn!(
+                    error = %e,
+                    "Persisted identity unusable; using an ephemeral identity"
+                );
+                tls::generate_identity(lan_ip)?
+            }
+            Err(e) => return Err(e),
+        },
+        None => tls::generate_identity(lan_ip)?,
+    };
+    if cli.dump_certs {
+        tls::dump_certs(&identity)?;
+    }
 
     // ── Print startup banner ────────────────────────────────────────────
     let url = format!("https://{}:{}", url_host(&lan_ip), cli.port);
@@ -417,6 +464,30 @@ fn parse_ip_arg(s: &str) -> anyhow::Result<IpAddr> {
         .unwrap_or(s);
     bare.parse::<IpAddr>()
         .map_err(|e| anyhow::anyhow!("invalid --ip value '{s}': {e}"))
+}
+
+/// Resolve the pairing PIN through the persisted store (write-through for a
+/// fixed PIN, generate-and-persist for `random`/first run).
+fn resolve_stored_pin(
+    store: &persistence::IdentityStore,
+    cmd: &persistence::PinArg,
+) -> anyhow::Result<String> {
+    match cmd {
+        persistence::PinArg::Fixed(pin) => {
+            store.write_pin(pin)?;
+            Ok(pin.clone())
+        }
+        persistence::PinArg::Random => store.write_random_pin(),
+        persistence::PinArg::Default => store.read_pin(),
+    }
+}
+
+/// One-shot PIN for the ephemeral (non-persisting) path.
+fn ephemeral_pin(cmd: &persistence::PinArg) -> String {
+    match cmd {
+        persistence::PinArg::Fixed(pin) => pin.clone(),
+        persistence::PinArg::Random | persistence::PinArg::Default => persistence::random_pin(),
+    }
 }
 
 /// Format an IP address for use in a URL authority, bracketing IPv6 literals
