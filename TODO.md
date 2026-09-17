@@ -25,7 +25,7 @@
 | G1 | 持久化 TLS 身份 + PIN（ADR-0015） | ✅ 完成（dev，含单测/E2E 双启动） |
 | G2 | 持久化 session token + renew 跨重启（ADR-0016） | ✅ 完成（审查通过，82 测绿） |
 | G3 | 客户端 localStorage + 无 hash 自动 renew | ✅ 完成（ADR-0017，20 JS 单测 + 82 cargo 测绿） |
-| G4 | PWA / 添加到主屏幕 | 🟨 代码完成，待设备手动验收（ADR-0018 + #4） |
+| G4 | PWA / 添加到主屏幕 | ✅ 完成（ADR-0018 + #4；手动验收；iOS 存储隔离已文档化） |
 | U1 | 上游 PR：Safari createWritable（#2） | 🔍 审查通过，待合/文档策略 |
 | U2 | 上游 PR：fake-ip 过滤（#3） | 🔍 审查通过，待合/小修注释 |
 | U0 | 上游无 `docs/`：AGENTS ↔ fork ADR 漂移 | 📋 策略待定（接受 / 外链 / 上游建 ADR） |
@@ -103,26 +103,25 @@
 
 ---
 
-## G4 — PWA 可安装入口 ⬜ 实现中
+## G4 — PWA 可安装入口 ✅
 
 **依赖：** G3 完成（✅ 已满足）。
 
 ### Grill 已收口（ADR-0018）
 
 - [x] spec 已发布：`hu3rror/QuicMic#4`（ready-for-agent）；测试 seams 已确认（web/ 一致性 node 测试 + CSP header oneshot + 手动验收）
-
 - [x] 平台范围：iOS 优先、Android 顺带；manifest 按 W3C 标准写全；不承诺 Chrome 自动安装（自签非 secure context）
 - [x] 图标：独立 PNG（`web/icons/` 180/192/512），替换内联 apple-touch-icon；favicon 保持内联
 - [x] **极简 SW**（仅注册 + 空 fetch 不缓存，为日后受信 CA 场景预留 Chromium 安装条件）—— 用户拍板方案 B
 - [x] 不加「添加到主屏幕」引导 UI（iOS 无法探测已安装，提示无法精准消失）
-- [x] `start_url: "/"`（无 hash → 走 G3 resume）、`display: standalone`、CSP 加 `worker-src 'self'`
+- [x] `start_url: "/"`（无 hash → 走 G3 resume）、`display: standalone`；CSP `worker-src 'self'`（初始提交已有，实现时仅测试锁定）
 - [x] 文档：ADR-0018 已写；CONTEXT.md 已加「Home-screen entry / 主屏入口」
 
 ### 待实现
 
 - [x] `web/manifest.webmanifest`、`web/sw.js`、`web/icons/icon-{180,192,512}.png`；index.html 链接 manifest + apple-touch-icon 换文件；app.js 注册 SW（渐进增强）
 - [x] 自动验收：`web/pwa.test.js`（manifest 字段/图标存在+尺寸/HTML 接线/SW stub 无缓存）+ CSP header oneshot 测试；fmt/clippy/test（83）与 `node --test`（24）全绿
-- [ ] 手动验收（设备）：iOS Safari 添加主屏幕 → standalone → resume 免 PIN；Android 手动添加；PIN 重置后图标进入配对；CSP 已在初始提交含 `worker-src 'self'`（仅测试锁定，无 header 改动）
+- [x] 手动验收（设备）：iOS Safari 添加主屏幕 → standalone → resume 免 PIN ✅；**发现 iOS 存储隔离**：主屏 Web App 与 Safari 的 localStorage/cookie 完全隔离 → 图标首次打开需配一次 PIN；Safari 与图标交替使用互踢（服务端单 token 槽，ADR-0016）→ 已采纳方案 A（接受限制 + 文档化），ADR-0018/README 已记录；CSP 已在初始提交含 `worker-src 'self'`（仅测试锁定，无 header 改动）
 
 ---
 
@@ -144,6 +143,15 @@
 
 - [ ] 选定：接受上游无 ADR / AGENTS 外链 fork / 推动上游建 `docs/adr`
 - [ ] fork `dev` 与 upstream 合入时 **不要**把 G1/G2 与 U1/U2 打成同一大 PR
+
+---
+
+## G5 — 网页内相机扫码入口 ⬜ 待评估
+
+**动机：** iOS 主屏 Web App 与 Safari 存储隔离（G4-A 已文档化），图标首次打开仍需输 PIN；在网页 app 内直接调用摄像头扫 PC 端 QR，免去"另开相机 app"的步骤，可提升首次配对体验。
+
+- [ ] grill：QR 仅编码 6 位 PIN vs 完整 URL；解码实现（vendor jsQR? 零依赖自研?）；`getUserMedia` 权限/CSP/Permissions-Policy；iOS standalone 内摄像头可用性；与应用内已有 mic 权限流程的交互
+- [ ] 实现 + 验收（若评估通过）
 
 ---
 

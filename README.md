@@ -20,7 +20,7 @@ QuicMic runs a tiny server on your computer and serves a web page to your phone.
 - **No installation on the phone** — it's just a web page; works on iOS Safari, Android Chrome, and desktop browsers.
 - **Secure pairing** — a 6-digit PIN (random on first run, then fixed per machine) with brute-force lockout; the PIN never leaves the device in plaintext requests.
 - **QR-code setup** — scan the code printed in the terminal to open the page pre-filled with the PIN.
-- **Home-screen ready (optional)** — add the page to your phone's home screen (iOS Safari "Add to Home Screen", Android Chrome manual add): a paired device then opens straight into the main screen with no PIN. (Automatic PWA install prompts are unavailable under QuicMic's self-signed certificate.)
+- **Home-screen ready (optional)** — add the page to your phone's home screen (iOS Safari "Add to Home Screen", Android Chrome manual add): a paired device then opens straight into the main screen with no PIN. (Automatic PWA install prompts are unavailable under QuicMic's self-signed certificate. iOS caveat: the home-screen web app keeps its storage separate from Safari, so the first open from the icon needs one PIN pairing — afterwards it resumes PIN-free; prefer sticking to one entry.)
 - **Live audio controls** — noise gate, gain, and latency-recovery sliders, adjustable at runtime from the phone.
 - **Eco Mode** — a black-screen overlay that keeps streaming alive while saving battery / preventing OLED burn-in.
 - **Resilient** — automatic reconnect on transient drops, instant handover on page refresh, and reliable shutdown detection.
