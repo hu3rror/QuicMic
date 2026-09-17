@@ -27,9 +27,9 @@
 | G3 | 客户端 localStorage + 无 hash 自动 renew | ✅ 完成（ADR-0017，20 JS 单测 + 82 cargo 测绿） |
 | G4 | PWA / 添加到主屏幕 | ✅ 完成（ADR-0018 + #4；手动验收；iOS 存储隔离已文档化） |
 | G5 | 网页内相机扫码入口 | ✅ 完成（ADR-0019 + #5；自动 31/31 + cargo 83 + 手动验收通过） |
-| U1 | 上游 PR：Safari createWritable（#2） | 🔍 审查通过，待合/文档策略 |
-| U2 | 上游 PR：fake-ip 过滤（#3） | 🔍 审查通过，待合/小修注释 |
-| U0 | 上游无 `docs/`：AGENTS ↔ fork ADR 漂移 | 📋 策略待定（接受 / 外链 / 上游建 ADR） |
+| U1 | 上游 PR：Safari createWritable（#2） | 📤 已发上游，fork 自维护（不追求合入） |
+| U2 | 上游 PR：fake-ip 过滤（#3） | 📤 已发上游，fork 自维护（不追求合入） |
+| U0 | 上游无 `docs/`：AGENTS ↔ fork ADR 漂移 | ✅ 接受分叉：fork 文档自成一派（ADR-0001..0019） |
 
 ---
 
@@ -131,18 +131,18 @@
 ### U1 — PR #2 Safari `createWritable`
 
 - [x] 行为正确（feature-detect）
-- [ ] 合入策略：接受 AGENTS 无 ADR，或 PR 说明见 fork ADR
-- [ ] 可选：BCD 矩阵只保留一处权威来源
+- [x] 合入策略（拍板）：PR 挂上游、不追求合入，fork 自维护——上游 AGENTS 无 ADR 接受，不引 fork ADR
+- [x] 可选：BCD 单源不做（不动 PR 分支）
 
 ### U2 — PR #3 fake-ip 过滤
 
 - [x] 行为与排名逻辑正确
-- [ ] 可选：收紧 IPv6 注释（勿过度承诺 multicast）
-- [ ] README 改动保留（良性 scope）
+- [x] 可选：收紧 IPv6 注释不做（不动 PR 分支）
+- [x] README 改动保留（良性 scope，随 PR 挂上游）
 
 ### U0 — 文档体系
 
-- [ ] 选定：接受上游无 ADR / AGENTS 外链 fork / 推动上游建 `docs/adr`
+- [x] 选定：接受上游无 ADR；fork 文档自成一派（不外链、不推动上游建 `docs/adr`）
 - [ ] fork `dev` 与 upstream 合入时 **不要**把 G1/G2 与 U1/U2 打成同一大 PR
 
 ---
