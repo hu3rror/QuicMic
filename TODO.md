@@ -143,7 +143,7 @@
 ### U0 — 文档体系
 
 - [x] 选定：接受上游无 ADR；fork 文档自成一派（不外链、不推动上游建 `docs/adr`）
-- [ ] fork `dev` 与 upstream 合入时 **不要**把 G1/G2 与 U1/U2 打成同一大 PR
+- [x] fork `dev` 与 upstream 合入时 **不要**把 G1/G2 与 U1/U2 打成同一大 PR（约定已确认——AGENTS.md fork 段；PR 分支基于 `main` 仅含 PR 提交）
 
 ---
 
@@ -180,10 +180,9 @@
 
 ## 建议执行顺序
 
-1. ~~G1~~ → ~~G2~~ → ~~G3~~  
-2. **G4 grill → implement（可选）**  
-3. U1/U2 按维护者节奏合；U0 定策略  
-4. 需要时再 `origin/dev` push（需你确认再让 Agent push）
+1. ~~G1~~ → ~~G2~~ → ~~G3~~ → ~~G4~~ → ~~G5~~
+2. U1/U2 PR 挂上游、fork 自维护（不追求合入）；U0 已拍板接受分叉
+3. 维护循环：`dev` 与 `upstream/main` 零落后（sync 时 `git merge --ff-only upstream/main` 进 `main`）；需要时 push `origin/dev`（需你确认再让 Agent push）
 
 ---
 

@@ -20,6 +20,7 @@ QuicMic runs a tiny server on your computer and serves a web page to your phone.
 - **No installation on the phone** — it's just a web page; works on iOS Safari, Android Chrome, and desktop browsers.
 - **Secure pairing** — a 6-digit PIN (random on first run, then fixed per machine) with brute-force lockout; the PIN never leaves the device in plaintext requests.
 - **QR-code setup** — scan the code printed in the terminal to open the page pre-filled with the PIN.
+- **In-app QR scan** — the pairing screen's Scan button decodes the same QR with your phone's camera (works inside the home-screen web app too): no separate camera app and no typing needed. Manual PIN entry always remains available.
 - **Home-screen ready (optional)** — add the page to your phone's home screen (iOS Safari "Add to Home Screen", Android Chrome manual add): a paired device then opens straight into the main screen with no PIN. (Automatic PWA install prompts are unavailable under QuicMic's self-signed certificate. iOS caveat: the home-screen web app keeps its storage separate from Safari, so the first open from the icon needs one PIN pairing — afterwards it resumes PIN-free; prefer sticking to one entry.)
 - **Live audio controls** — noise gate, gain, and latency-recovery sliders, adjustable at runtime from the phone.
 - **Eco Mode** — a black-screen overlay that keeps streaming alive while saving battery / preventing OLED burn-in.
@@ -131,7 +132,7 @@ Then `cargo build` works normally. This is a one-time, machine-local toolchain s
 
    It prints a banner with the URL, PIN, and a QR code.
 
-2. On your phone, either **scan the QR code** or open the printed `https://<PC-IP>:8443` URL and enter the PIN.
+2. On your phone, either **scan the QR code** or open the printed `https://<PC-IP>:8443` URL and enter the PIN (the pairing screen also has an in-app **Scan** button that decodes the QR with your phone's camera).
 
 3. Tap the microphone button to start streaming. Long-press it to mute.
 
