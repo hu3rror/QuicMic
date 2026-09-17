@@ -38,6 +38,7 @@
             <input type="tel" id="pin-input" class="pin-input" maxlength="6" inputmode="numeric" pattern="[0-9]{6}"
                 required placeholder="——————" autocomplete="off" aria-label="6-digit pairing PIN">
             <button id="pair-btn" class="btn btn-primary">Connect</button>
+            <button id="scan-btn" class="btn btn-secondary">📷 Scan QR</button>
             <div id="pair-status" class="pair-status" hidden></div>
         </div>
 
@@ -159,10 +160,22 @@
         </div>
     </div>
 
+    <!-- In-app QR Scan Overlay (ADR-0019): full-screen camera viewfinder that
+         decodes the Pairing QR on the PC screen. The pairing card stays intact
+         underneath; cancel returns to manual PIN entry. -->
+    <div id="scan-overlay" class="scan-overlay">
+        <video id="scan-video" class="scan-video" playsinline muted></video>
+        <div class="scan-grid" aria-hidden="true"></div>
+        <div id="scan-status" class="scan-status" role="status" aria-live="polite"></div>
+        <button id="scan-cancel-btn" class="btn btn-secondary scan-cancel">Cancel</button>
+    </div>
+
     <!-- Toast Notification -->
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
     <script src="session.js"></script>
+    <script src="jsqr.js"></script>
+    <script src="qr.js"></script>
     <script src="app.js"></script>
 </body>
 

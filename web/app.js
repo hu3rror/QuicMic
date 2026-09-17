@@ -50,6 +50,14 @@ let waitStartedAt = 0;       // When the server wait began, for its ~60s cap.
 let waitTimer = null;        // The ~3s re-validation tick of the server wait.
 let voiceTimeout = null;     // Debounce for the voice-activity glow on the mic ring.
 
+// In-app QR scan (ADR-0019)
+let scanStream = null;     // Active camera stream while the viewfinder is up.
+let scanStarting = false;  // A getUserMedia acquisition is in flight.
+let scanRAF = null;        // requestAnimationFrame id of the decode loop.
+let scanLastFrame = 0;     // Timestamp of the last processed frame.
+let scanCanvas = null;     // Off-screen sampling canvas (lazy).
+let scanCtx = null;        // Its 2d context.
+
 // Auto-reconnect
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 5;
@@ -108,6 +116,11 @@ const updateDismiss = document.getElementById('update-dismiss');
 const powerSaveBtn = document.getElementById('power-save-btn');
 const powerSaveOverlay = document.getElementById('power-save-overlay');
 const exitPowerSaveBtn = document.getElementById('exit-power-save-btn');
+const scanBtn = document.getElementById('scan-btn');
+const scanOverlay = document.getElementById('scan-overlay');
+const scanVideo = document.getElementById('scan-video');
+const scanStatus = document.getElementById('scan-status');
+const scanCancelBtn = document.getElementById('scan-cancel-btn');
 
 // Settings UI
 const settingsBtn = document.getElementById('settings-btn');
@@ -212,6 +225,8 @@ async function init() {
     });
 
     pairBtn.addEventListener('click', doPair);
+    scanBtn.addEventListener('click', startScan);
+    scanCancelBtn.addEventListener('click', stopScan);
     reloadBtn.addEventListener('click', () => location.reload());
     updateDismiss.addEventListener('click', () => {
         updateBanner.hidden = true;
@@ -328,6 +343,9 @@ async function init() {
     // the microphone was lost — often audio keeps flowing — so it must never raise
     // an alarm on its own. Only the OS's actual mic events do that.
     document.addEventListener('visibilitychange', () => {
+        // Going hidden while scanning must release the camera immediately (the OS
+        // stops it anyway; a stale preview would mislead on return).
+        if (document.visibilityState === 'hidden' && scanStream) stopScan();
         if (document.visibilityState === 'visible') onPageVisible();
     });
 }
@@ -454,6 +472,7 @@ function enterServerWait() {
     pairScreen.classList.add('active');
     pinInput.disabled = true;
     pairBtn.disabled = true;
+    scanBtn.disabled = true;
     serverLost.hidden = true;
     showPairingStatus('Waiting for server…');
     waitStartedAt = Date.now();
@@ -530,12 +549,14 @@ function returnToPairing(reason, reloadRequired = false) {
         pinInput.value = '';
         pinInput.disabled = true;
         pairBtn.disabled = true;
+        scanBtn.disabled = true;
         serverLost.hidden = false;
     } else {
         // Server still reachable (e.g. the session was taken over): let the user
         // re-pair in place — the cert is unchanged, so it works without a reload.
         pinInput.disabled = false;
         pairBtn.disabled = false;
+        scanBtn.disabled = false;
         serverLost.hidden = true;
         pinInput.value = '';
         pinInput.focus();
@@ -772,6 +793,7 @@ async function renewToken() {
 
 /** Show the main screen (shared by pairing and resume). */
 function enterMainScreen() {
+    if (scanStream) stopScan(); // Never carry a live camera past the pairing card.
     pairScreen.classList.remove('active');
     mainScreen.classList.add('active');
 }
@@ -814,6 +836,151 @@ async function doPair() {
         pairBtn.disabled = false;
         pairBtn.textContent = 'Connect';
     }
+}
+
+// ── In-app QR Scan (ADR-0019) ─────────────────────────────────────────
+//
+// The pairing card's Scan button opens a full-screen camera viewfinder that
+// decodes the server's Pairing QR (CONTEXT.md) with the vendored jsQR. A
+// successful decode feeds the existing typed-PIN pair path — scanning is
+// exactly equivalent to typing: no hash mutation, no token clear, no history
+// change, and one pair attempt per decode (never an auto-retry, so a bad scan
+// cannot trip the pairing throttle, ADR-0012). Manual entry always remains;
+// camera failures degrade to a hint on the card (ADR-0019).
+
+// Sample at most this many pixels on the longest edge — downscaling keeps a 4K
+// camera from feeding jsQR megabytes per frame.
+const SCAN_MAX_SAMPLE = 720;
+// ~6-7 fps decode throttle: fast enough to catch a hand-held QR, cheap enough
+// to leave the CPU alone.
+const SCAN_FRAME_MS = 150;
+
+/** True while the user is still watching the viewfinder in the foreground. */
+function isScanWanted() {
+    return scanOverlay.classList.contains('active') && document.visibilityState === 'visible';
+}
+
+/** Sampled frame size (camera size capped on the longest edge), or null while
+ *  the video dimensions are not known yet. */
+function scanFrameSize() {
+    const vw = scanVideo.videoWidth || 0;
+    const vh = scanVideo.videoHeight || 0;
+    if (!vw || !vh) return null;
+    const scale = Math.min(1, SCAN_MAX_SAMPLE / Math.max(vw, vh));
+    return { width: Math.round(vw * scale), height: Math.round(vh * scale) };
+}
+
+function ensureScanCanvas(width, height) {
+    if (!scanCanvas) {
+        scanCanvas = document.createElement('canvas');
+        // willReadFrequently: we getImageData on every sampled frame.
+        scanCtx = scanCanvas.getContext('2d', { willReadFrequently: true });
+    }
+    if (scanCanvas.width !== width || scanCanvas.height !== height) {
+        scanCanvas.width = width;
+        scanCanvas.height = height;
+    }
+}
+
+/** One viewfinder tick: sample, decode, pair on a hit, keep scanning otherwise. */
+function scanFrame(ts) {
+    if (!scanStream) return; // Stopped while a frame was queued.
+    if (ts - scanLastFrame >= SCAN_FRAME_MS) {
+        scanLastFrame = ts;
+        const size = scanFrameSize();
+        if (size) {
+            ensureScanCanvas(size.width, size.height);
+            scanCtx.drawImage(scanVideo, 0, 0, size.width, size.height);
+            const data = scanCtx.getImageData(0, 0, size.width, size.height);
+            const text = QuicMicQr.decodeQr(data.data, size.width, size.height);
+            if (text) {
+                const pin = QuicMicQr.parseScannedText(text);
+                if (pin) {
+                    stopScan();
+                    pinInput.value = pin;
+                    // One pair attempt per successful decode — a wrong PIN
+                    // behaves exactly like a typed one (ADR-0019).
+                    doPair();
+                    return;
+                }
+                // A QR that is not the Pairing QR shape: keep scanning.
+            }
+        }
+    }
+    scanRAF = requestAnimationFrame(scanFrame);
+}
+
+async function startScan() {
+    if (scanStream || scanStarting) return; // Already scanning / starting.
+    scanStarting = true;
+    hidePairingStatus();
+    scanOverlay.classList.add('active');
+    scanStatus.textContent = 'Point the camera at the QR code on the PC screen';
+
+    let stream;
+    try {
+        // Rear camera, capped request — the sampling loop downsizes anyway.
+        stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+                facingMode: 'environment',
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+            },
+        });
+    } catch (e) {
+        // A single denied/unavailable camera never dead-ends pairing: degrade to
+        // manual entry (ADR-0019). getUserMedia re-prompts or re-fails the same
+        // way on retry, so looping here would buy nothing.
+        console.warn('[scan] camera unavailable:', e && e.name);
+        stopScan();
+        showToast(QuicMicQr.captureErrorMessage(e));
+        return;
+    } finally {
+        scanStarting = false;
+    }
+
+    scanStream = stream;
+    scanVideo.srcObject = stream;
+    // The user may have cancelled (or the page hidden) while the permission
+    // prompt was up — non-modal desktop prompts leave the page interactive.
+    // Never start a camera nobody is looking at; stopScan() releases it.
+    if (!isScanWanted()) {
+        stopScan();
+        return;
+    }
+    try {
+        // iOS needs an explicit play() from the user-gesture chain; the element
+        // is `playsinline muted`, so no fullscreen is triggered.
+        await scanVideo.play();
+    } catch (e) {
+        console.warn('[scan] video play failed:', e);
+        stopScan();
+        showToast(QuicMicQr.captureErrorMessage(e));
+        return;
+    }
+    // Same guard after play(): another exit path may have closed the overlay.
+    if (!isScanWanted()) {
+        stopScan();
+        return;
+    }
+    scanLastFrame = 0;
+    scanRAF = requestAnimationFrame(scanFrame);
+}
+
+/** Stop the camera and close the viewfinder. Idempotent. */
+function stopScan() {
+    if (scanRAF) {
+        cancelAnimationFrame(scanRAF);
+        scanRAF = null;
+    }
+    if (scanStream) {
+        scanStream.getTracks().forEach((track) => track.stop());
+        scanStream = null;
+    }
+    if (scanVideo) {
+        scanVideo.srcObject = null;
+    }
+    scanOverlay.classList.remove('active');
 }
 
 // ── Microphone Toggle ─────────────────────────────────────────────────
