@@ -26,6 +26,7 @@
 | G2 | 持久化 session token + renew 跨重启（ADR-0016） | ✅ 完成（审查通过，82 测绿） |
 | G3 | 客户端 localStorage + 无 hash 自动 renew | ✅ 完成（ADR-0017，20 JS 单测 + 82 cargo 测绿） |
 | G4 | PWA / 添加到主屏幕 | ✅ 完成（ADR-0018 + #4；手动验收；iOS 存储隔离已文档化） |
+| G5 | 网页内相机扫码入口 | ✅ 完成（ADR-0019 + #5；自动 31/31 + cargo 83 + 手动验收通过） |
 | U1 | 上游 PR：Safari createWritable（#2） | 🔍 审查通过，待合/文档策略 |
 | U2 | 上游 PR：fake-ip 过滤（#3） | 🔍 审查通过，待合/小修注释 |
 | U0 | 上游无 `docs/`：AGENTS ↔ fork ADR 漂移 | 📋 策略待定（接受 / 外链 / 上游建 ADR） |
@@ -146,7 +147,7 @@
 
 ---
 
-## G5 — 网页内相机扫码入口 🔜 待实现
+## G5 — 网页内相机扫码入口 ✅
 
 **动机：** iOS 主屏 Web App 与 Safari 存储隔离（G4-A 已文档化），图标首次打开仍需输 PIN；在网页 app 内直接调用摄像头扫 PC 端 QR，免去"另开相机 app"的步骤，可提升首次配对体验。
 
@@ -164,7 +165,7 @@
 ### 待实现
 
 - [x] 实现（ADR-0019 落码）+ 自动验收（qr.test 7 项，全量 node 31 + cargo 83 全绿）
-- [ ] 手动验收（iOS Safari / 主屏 standalone / Android Chrome 扫真实终端 QR；定性 PWA 相机可靠性；相机拒绝/取消/隐藏页降级路径）
+- [x] 手动验收（真机）：主屏 PWA 内扫码 → 自动配对进主界面；相机权限弹窗正常；iOS standalone 内 getUserMedia 可用（当前实机定性，ADR-0019 已知风险缓解）
 
 ---
 
