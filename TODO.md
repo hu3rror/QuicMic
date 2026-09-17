@@ -146,12 +146,25 @@
 
 ---
 
-## G5 — 网页内相机扫码入口 ⬜ 待评估
+## G5 — 网页内相机扫码入口 🔜 待实现
 
 **动机：** iOS 主屏 Web App 与 Safari 存储隔离（G4-A 已文档化），图标首次打开仍需输 PIN；在网页 app 内直接调用摄像头扫 PC 端 QR，免去"另开相机 app"的步骤，可提升首次配对体验。
 
-- [ ] grill：QR 仅编码 6 位 PIN vs 完整 URL；解码实现（vendor jsQR? 零依赖自研?）；`getUserMedia` 权限/CSP/Permissions-Policy；iOS standalone 内摄像头可用性；与应用内已有 mic 权限流程的交互
-- [ ] 实现 + 验收（若评估通过）
+### Grill 已收口（ADR-0019，评估通过）
+
+- [x] 范围：纯 `web/`、服务端零改动；配对屏扫码按钮 → 复用 `doPair`；手输永远可用（渐进增强，不 gate 配对）
+- [x] QR 内容不变（`URL+#PIN`，OS 相机深链依赖）；应用内只提取 `#(\d{6})$`，其余视为扫描失败
+- [x] 解码：vendor jsQR 单文件（Apache-2.0 + license 头）；弃 BarcodeDetector（iOS 不可用）/ 自研（成本不成比例）
+- [x] 扫描 UX：实时取景循环（降采样 ~5-10fps）；成功/取消/切后台即停相机
+- [x] 权限：两次独立弹窗（扫码时相机、连接时麦克风）；iOS standalone 相机不可靠 → 已知风险 + 降级手输，真机验收定性
+- [x] 语义：扫码 ≡ 手输 PIN（不动 hash/token/history）；每成功解码只 pair 一次、不自动重试（防 ADR-0012 节流锁）
+- [x] 测试：qr.js 纯模块 parse 单测 + PPM fixture 解码集成测试 + iOS Safari/standalone/Android 手动验收；CI 不动
+- [x] 文档：ADR-0019 已写；CONTEXT.md 已加 Pairing QR / In-app scan
+
+### 待实现
+
+- [x] 实现（ADR-0019 落码）+ 自动验收（qr.test 7 项，全量 node 31 + cargo 83 全绿）
+- [ ] 手动验收（iOS Safari / 主屏 standalone / Android Chrome 扫真实终端 QR；定性 PWA 相机可靠性；相机拒绝/取消/隐藏页降级路径）
 
 ---
 
