@@ -637,6 +637,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn static_assets_csp_allows_same_origin_worker() {
+        // The installable entry (ADR-0018) registers a same-origin service worker;
+        // the strict CSP must keep an explicit `worker-src 'self'` so registration
+        // is never blocked. Guards a regression that drops the directive.
+        let app = build_router(test_state());
+        let resp = app.oneshot(get("/")).await.unwrap();
+        let csp = resp
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            csp.contains("worker-src 'self'"),
+            "CSP allows same-origin workers: {csp}"
+        );
+    }
+
+    #[tokio::test]
     async fn rejects_cross_origin_but_allows_same_origin() {
         let app = build_router(test_state());
 

@@ -177,6 +177,15 @@ async function isServerAlive() {
 const INFO_FETCH_ATTEMPTS = 3;
 
 async function init() {
+    // Installability hook (ADR-0018): register the inert service worker as
+    // progressive enhancement. The worker never intercepts or caches anything;
+    // registration only matters on a secure-context origin (a future
+    // trusted-CA setup), and failing silently is correct everywhere else —
+    // under the self-signed certificate `serviceWorker` is not even exposed.
+    if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/sw.js').catch(() => {});
+    }
+
     for (let attempt = 1; ; attempt++) {
         try {
             const resp = await fetchWithTimeout('/api/info');

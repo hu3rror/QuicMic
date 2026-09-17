@@ -25,7 +25,7 @@
 | G1 | 持久化 TLS 身份 + PIN（ADR-0015） | ✅ 完成（dev，含单测/E2E 双启动） |
 | G2 | 持久化 session token + renew 跨重启（ADR-0016） | ✅ 完成（审查通过，82 测绿） |
 | G3 | 客户端 localStorage + 无 hash 自动 renew | ✅ 完成（ADR-0017，20 JS 单测 + 82 cargo 测绿） |
-| G4 | PWA / 添加到主屏幕 | ⬜ 等 G3 |
+| G4 | PWA / 添加到主屏幕 | 🟨 代码完成，待设备手动验收（ADR-0018 + #4） |
 | U1 | 上游 PR：Safari createWritable（#2） | 🔍 审查通过，待合/文档策略 |
 | U2 | 上游 PR：fake-ip 过滤（#3） | 🔍 审查通过，待合/小修注释 |
 | U0 | 上游无 `docs/`：AGENTS ↔ fork ADR 漂移 | 📋 策略待定（接受 / 外链 / 上游建 ADR） |
@@ -109,6 +109,8 @@
 
 ### Grill 已收口（ADR-0018）
 
+- [x] spec 已发布：`hu3rror/QuicMic#4`（ready-for-agent）；测试 seams 已确认（web/ 一致性 node 测试 + CSP header oneshot + 手动验收）
+
 - [x] 平台范围：iOS 优先、Android 顺带；manifest 按 W3C 标准写全；不承诺 Chrome 自动安装（自签非 secure context）
 - [x] 图标：独立 PNG（`web/icons/` 180/192/512），替换内联 apple-touch-icon；favicon 保持内联
 - [x] **极简 SW**（仅注册 + 空 fetch 不缓存，为日后受信 CA 场景预留 Chromium 安装条件）—— 用户拍板方案 B
@@ -118,8 +120,9 @@
 
 ### 待实现
 
-- [ ] `web/manifest.webmanifest`、`web/sw.js`、`web/icons/icon-{180,192,512}.png`；index.html 链接 manifest + apple-touch-icon 换文件；app.js 注册 SW
-- [ ] 验收：已 pair 设备从主屏打开无需 PIN（iOS Safari 添加主屏幕；Android 手动添加）；manifest 字段/图标静态检查；fmt/clippy/test + `node --test` 保持绿
+- [x] `web/manifest.webmanifest`、`web/sw.js`、`web/icons/icon-{180,192,512}.png`；index.html 链接 manifest + apple-touch-icon 换文件；app.js 注册 SW（渐进增强）
+- [x] 自动验收：`web/pwa.test.js`（manifest 字段/图标存在+尺寸/HTML 接线/SW stub 无缓存）+ CSP header oneshot 测试；fmt/clippy/test（83）与 `node --test`（24）全绿
+- [ ] 手动验收（设备）：iOS Safari 添加主屏幕 → standalone → resume 免 PIN；Android 手动添加；PIN 重置后图标进入配对；CSP 已在初始提交含 `worker-src 'self'`（仅测试锁定，无 header 改动）
 
 ---
 
