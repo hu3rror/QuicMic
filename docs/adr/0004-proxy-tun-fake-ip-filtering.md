@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-09-16
-- **Provenance:** commit `95f8302` (fork; PR Fix3dll/QuicMic#3, final form `78aed03` after upstream review)
+- **Provenance:** fork commit `95f8302` → upstream PR Fix3dll/QuicMic#3, merged as squash `2348666` (2026-09-19); upstream polish in `e074219` (std `is_private` ranking, IPv6 multicast exclusion, `vbox` keyword).
 
 ## Background
 
@@ -10,8 +10,8 @@
 
 ## Decision
 
-- `detect_lan_ip()` trusts the default-route pick **only when it is a usable LAN address**. `is_unusable_lan_addr` rejects `0.0.0.0/8`, loopback, link-local, multicast/reserved `240/4`, and the RFC 2544 benchmark range `198.18.0.0/15` (the de-facto fake-ip default for mihomo/Clash, sing-box, Surge).
-- Otherwise `list_afinet_netifas()` is scanned and the best-ranked candidate is picked (`pick_lan_ip` + `lan_addr_rank`): RFC 1918 (2) > CGNAT `100.64/10` and IPv6 (1) > public IPv4 (0), IPv4 over IPv6 on rank ties. Same-rank same-family ties (e.g. Wi-Fi `192.168.x` vs a Hyper-V/WSL `172.x`) break in favour of physical adapters: virtual ones (`is_virtual_adapter`: `vEthernet`/`wsl`/`docker`/`vmnet`/`tun`/… name patterns) are deprioritized, and any remaining tie resolves by OS enumeration order (`max_by_key`'s last maximum).
+- `detect_lan_ip()` trusts the default-route pick **only when it is a usable LAN address**. `is_unusable_lan_addr` rejects `0.0.0.0/8`, loopback, link-local, multicast/reserved `240/4`, and the RFC 2544 benchmark range `198.18.0.0/15` (the de-facto fake-ip default for mihomo/Clash, sing-box, Surge); on the IPv6 arm it also rejects multicast and unspecified addresses.
+- Otherwise `list_afinet_netifas()` is scanned and the best-ranked candidate is picked (`pick_lan_ip` + `lan_addr_rank`): RFC 1918 (`v4.is_private()`, 2) > CGNAT `100.64/10` and IPv6 (1) > public IPv4 (0), IPv4 over IPv6 on rank ties. Same-rank same-family ties (e.g. Wi-Fi `192.168.x` vs a Hyper-V/WSL `172.x`) break in favour of physical adapters: virtual ones (`is_virtual_adapter`: `vEthernet`/`wsl`/`docker`/`vmnet`/`vbox`/`tun`/… name patterns) are deprioritized, and any remaining tie resolves by OS enumeration order (`max_by_key`'s last maximum).
 - `--ip` remains the manual override.
 - The pure functions carry unit tests.
 - Behavior change bundled in the same commit: `detect_lan_ip` swallows `local_ip()` errors and falls through to the full scan, so an APIPA-only machine fails cleanly after the scan instead of on the default-route pick. (The initially-bundled `chunks_exact` → `as_chunks` clippy fix for `decode_into_ring` was dropped from the PR: upstream fixed the same lint itself in `4c4e14f`, so the processor change no longer exists beyond upstream `main`.)
