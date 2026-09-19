@@ -56,8 +56,8 @@ fn is_unusable_lan_addr(ip: IpAddr) -> bool {
         IpAddr::V4(v4) => {
             let o = v4.octets();
             o[0] == 0 // 0.0.0.0/8 "this network"
-                || o[0] == 127 // loopback
-                || (o[0] == 169 && o[1] == 254) // link-local (APIPA)
+                || v4.is_loopback()
+                || v4.is_link_local()
                 || (o[0] == 198 && (o[1] == 18 || o[1] == 19)) // RFC 2544 benchmark = fake-ip
                 || o[0] >= 224 // multicast / reserved
         }
@@ -96,21 +96,46 @@ fn lan_addr_rank(ip: IpAddr) -> u8 {
     }
 }
 
+/// Name patterns of common virtual adapters. Same-rank ties are broken in
+/// favour of physical NICs, so a Hyper-V/WSL/Docker/VMware adapter holding an
+/// otherwise-valid LAN address (a `vEthernet`/`docker0`/`vmnet` … with an RFC
+/// 1918 address) loses to the real Wi-Fi/Ethernet even when both are equally
+/// ranked. Keep this list conservative: a false positive only demotes an
+/// equally-ranked candidate, never the only candidate.
+fn is_virtual_adapter(name: &str) -> bool {
+    const KEYWORDS: [&str; 11] = [
+        "vethernet",
+        "wsl",
+        "docker",
+        "veth",
+        "vmnet",
+        "virbr",
+        "tailscale",
+        "zerotier",
+        "tun",
+        "tap",
+        "awdl",
+    ];
+    let n = name.to_ascii_lowercase();
+    KEYWORDS.iter().any(|k| n.contains(k))
+}
+
 /// Pick the best LAN address from an interface scan: drop unusable ranges, then
 /// prefer the highest-ranked address class, breaking rank ties in favour of
 /// IPv4 (matching the historical IPv4-first detection).
 ///
 /// Two same-rank, same-family candidates (e.g. a real Wi-Fi `192.168.x` and a
-/// Hyper-V/VPN `172.x`) are both valid and are resolved by `max_by_key`'s
-/// "last maximum" rule — i.e. OS enumeration order — which is reproducible per
-/// boot but not semantically meaningful. This only happens on the fallback path
-/// (when the default-route pick was unusable); `--ip` remains the manual
-/// override for multi-homed setups where the wrong address would be advertised.
+/// Hyper-V/VPN `172.x`) are both valid; virtual adapters (`is_virtual_adapter`)
+/// lose such ties, and the remaining ones resolve by `max_by_key`'s "last
+/// maximum" rule — i.e. OS enumeration order. This only happens on the
+/// fallback path (when the default-route pick was unusable); `--ip` remains
+/// the manual override for multi-homed setups where the wrong address would be
+/// advertised.
 fn pick_lan_ip(ifas: Vec<(String, IpAddr)>) -> Option<IpAddr> {
     ifas.into_iter()
-        .map(|(_name, ip)| ip)
-        .filter(|ip| !is_unusable_lan_addr(*ip))
-        .max_by_key(|ip| (lan_addr_rank(*ip), ip.is_ipv4()))
+        .filter(|(_, ip)| !is_unusable_lan_addr(*ip))
+        .max_by_key(|(name, ip)| (lan_addr_rank(*ip), ip.is_ipv4(), !is_virtual_adapter(name)))
+        .map(|(_, ip)| ip)
 }
 
 /// Detect an IP address that other devices on the LAN can actually reach.
@@ -668,6 +693,32 @@ mod tests {
             ("Ethernet".to_string(), v4(192, 168, 1, 16)),
         ];
         assert_eq!(pick_lan_ip(ifas), Some(v4(192, 168, 1, 16)));
+    }
+
+    #[test]
+    fn picker_deprioritizes_virtual_adapters_on_same_rank_ties() {
+        // Same rank (RFC 1918) and same family: a vEthernet (Hyper-V/WSL)
+        // holding 172.16.0.1 loses to the real Wi-Fi 192.168.1.42.
+        let ifas = vec![
+            ("Wi-Fi".to_string(), v4(192, 168, 1, 42)),
+            ("vEthernet (Default Switch)".to_string(), v4(172, 16, 0, 1)),
+        ];
+        assert_eq!(pick_lan_ip(ifas), Some(v4(192, 168, 1, 42)));
+    }
+
+    #[test]
+    fn picker_deprioritizes_virtual_adapters_regardless_of_enumeration_order() {
+        let ifas = vec![
+            ("vEthernet (WSL)".to_string(), v4(172, 20, 10, 1)),
+            ("Ethernet".to_string(), v4(192, 168, 1, 16)),
+        ];
+        assert_eq!(pick_lan_ip(ifas), Some(v4(192, 168, 1, 16)));
+    }
+
+    #[test]
+    fn picker_keeps_virtual_adapter_when_nothing_else_is_usable() {
+        let ifas = vec![("vEthernet (Default Switch)".to_string(), v4(172, 16, 0, 1))];
+        assert_eq!(pick_lan_ip(ifas), Some(v4(172, 16, 0, 1)));
     }
 
     #[test]
