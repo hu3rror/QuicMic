@@ -19,13 +19,9 @@ pub const MAX_SAMPLES_PER_PACKET: usize = 480;
 pub fn decode_into_ring(pcm_bytes: &[u8], ring: &RingBuffer) {
     let mut samples = [0i16; MAX_SAMPLES_PER_PACKET];
     let mut count = 0;
-    for chunk in pcm_bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .take(MAX_SAMPLES_PER_PACKET)
-    {
-        samples[count] = i16::from_le_bytes([chunk[0], chunk[1]]);
+    let (chunks, _) = pcm_bytes.as_chunks::<2>();
+    for chunk in chunks.iter().take(MAX_SAMPLES_PER_PACKET) {
+        samples[count] = i16::from_le_bytes(*chunk);
         count += 1;
     }
     if count > 0 {
